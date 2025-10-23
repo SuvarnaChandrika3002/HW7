@@ -1,0 +1,126 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.8, 3.9, "3.10", "3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Lint with flake8
+      run: |
+        # Stop the build if there are Python syntax errors or undefined names
+        python -m flake8 main.py tests/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+        python -m flake8 main.py tests/ --count --exit-zero --max-complexity=10 --max-line-length=79 --statistics
+    
+    - name: Type check with mypy
+      run: |
+        python -m mypy main.py
+    
+    - name: Test with pytest
+      run: |
+        python -m pytest --cov=main --cov-report=xml --cov-report=term-missing tests/
+    
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+
+  code-quality:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Check code formatting with Black
+      run: |
+        python -m black --check --diff .
+    
+    - name: Run security scan with Bandit
+      run: |
+        pip install bandit[toml]
+        bandit -r . -f json -o bandit-report.json || true
+    
+    - name: Upload Bandit scan results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: bandit-results
+        path: bandit-report.json
+
+  docker-test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Build Docker image
+      run: |
+        docker build -t qr-generator .
+    
+    - name: Test Docker container
+      run: |
+        # Create test output directory with proper permissions
+        mkdir -p test_output
+        chmod 777 test_output
+        
+        # Run container and capture output for debugging
+        echo "Running QR generator container..."
+        docker run --rm \
+          --user $(id -u):$(id -g) \
+          -v $(pwd)/test_output:/app/qr_codes \
+          -e QR_CODE_DIR=/app/qr_codes \
+          qr-generator --url https://github.com/test
+        
+        # Check if QR code was generated
+        echo "Contents of test_output directory:"
+        ls -la test_output/
+        
+        # Verify QR code file exists
+        if ls test_output/*.png 1> /dev/null 2>&1; then
+          echo "✅ QR code generated successfully!"
+          echo "Generated files:"
+          ls -la test_output/*.png
+        else
+          echo "❌ No QR code found in test_output/"
+          exit 1
+        fi
